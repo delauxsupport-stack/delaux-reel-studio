@@ -196,6 +196,19 @@
     </section>
 
     <div class="shots-heading">The video shots</div>
+    <div class="row-actions" style="margin-top:4px">
+      <label class="radio-row"><input type="radio" name="videoMode" value="per-shot" data-action="video-mode" checked /> Per shot prompts</label>
+      <label class="radio-row"><input type="radio" name="videoMode" value="kling-transitions" data-action="video-mode" /> Kling 3.0 transitions</label>
+    </div>
+    <div id="klingTransitionControls" hidden style="margin-top:8px">
+      <p class="dim-text" style="margin:0 0 8px">Kling 3.0 takes a start frame and an end frame. This chains your shots so each clip carries one shot's still into the next: shot 1 to shot 2, then 2 to 3, on through the reel, so it all plays as one smooth continuous piece. For each segment, set the start frame to the earlier shot's still and the end frame to the next shot's still.</p>
+      <div class="row-actions">
+        <label class="radio-row"><input type="radio" name="klingSrc" value="instant" data-action="kling-src" checked /> Instant, built from your shots</label>
+        <label class="radio-row"><input type="radio" name="klingSrc" value="director" data-action="kling-src" /> Director written, smoother</label>
+      </div>
+      <button class="btn-solid" id="writeTransitionsBtn" data-action="write-transitions" hidden style="margin-top:10px">Write smooth transitions with the director</button>
+      <p id="transitionsStatus" class="dim-text" style="margin-top:6px"></p>
+    </div>
     <div id="shotsGrid"></div>
     <div id="captionBlock" hidden></div>
     <div id="editSheetBlock" hidden></div>
@@ -329,9 +342,12 @@ const HOUSE_TASTE = [
 
 const STRUCTURES = ["Director's choice", "Save the cat", "Problem, agitation, solution", "Hero's journey", "In medias res", "Quiet twist", "Mystery box", "Two paths", "Day in the life"];
 
-const VERSION = "7.3";
+const VERSION = "7.4";
 try { document.title = "DELAUX Reel Studio v" + VERSION; } catch (e) {}
 const CHANGELOG = [
+  { version: "7.4", date: "2026-07-20", notes: [
+      "New Kling 3.0 transitions mode for the video shots. Above the shots there is now a toggle: Per shot prompts, which is the old Kling and Seedance per shot view, or Kling 3.0 transitions. Kling 3.0 takes a start frame and an end frame, so this mode chains your shots into continuous segments, shot 1 into shot 2, then 2 into 3, on through the reel, so the whole thing plays as one smooth connected piece instead of separate clips. Each segment card tells you which still is the start frame and which is the end frame, and gives you the Kling prompt for that continuous move. A second toggle picks how the transition prompts are written: Instant, built from your shots for free with no extra call, or Director written, a smart pass that reads the whole reel and writes the specific continuous motion that carries each shot into the next so it flows and makes sense. Director written costs a little API credit and there is a button to write or rewrite them.",
+    ] },
   { version: "7.3", date: "2026-07-20", notes: [
       "Rewrote the suitcase product prompt to Mathieu's simpler version, applied to every colourway and all three bags. The prompt no longer spells out the monogram, the key and lock pattern, or the gold wordmark in words, since the reference sheet image already carries those and the words were causing an over described, sometimes misspelled shell. The front view now just names the coloured front shell and the back view just names the plain black rear shell. Added the real wheel detail, the wheels have two lines, one vertical and one horizontal. Changed the rear shell rule to never any colour other than black. Dropped the hot glossy highlight line from the realism block. Size and colour stay fully dynamic: the size fills in from the bag you pick (Fior 22 x 9 x 14, Bior 26 x 10 x 18, Lior 30 x 11 x 20) and the colour from the reel, so the prompt adapts to the story every time.",
     ] },
@@ -707,6 +723,21 @@ function buildSeedancePrompt(shot, register, hasPerson) {
   return p;
 }
 
+// Builds an instant Kling 3.0 first and last frame transition prompt from two consecutive shots.
+// The clip begins exactly on shot A (the start frame) and moves in one unbroken take into shot B
+// (the end frame), so the pair cuts together invisibly and the reel reads as one continuous piece.
+function buildKlingTransitionInstant(a, b, register, hasPerson) {
+  let p = REALISM_BASE + " " + REFERENCE_LOCK;
+  p += " This is one continuous Kling 3.0 clip that opens on the start frame and carries in a single unbroken take into the end frame.";
+  p += " Start frame: " + (a.action || "") + (a.camera ? " The camera begins with " + a.camera + "." : "");
+  p += " Over the clip, move smoothly and continuously, with no cut, into the end frame: " + (b.action || "") + (b.camera ? " settling into " + b.camera + "." : "");
+  if (b.poi) p += " Land the eye on " + b.poi + ".";
+  p += " Keep the DELAUX case and any named person identical across both frames, match the light and the grade end to end so the join is invisible, and ease gently to rest on the end frame.";
+  if (hasPerson) p += " " + SKIN_LOCK;
+  p += " " + (REGISTER_PACING[String(register || "").toLowerCase()] || REGISTER_PACING.graceful);
+  return p;
+}
+
 // ---------- Still image prompts, built from the exact same shot data as the video prompts so they never drift ----------
 function buildStillPrompt(shot, hasPerson) {
   let p = STILL_REALISM_BASE + " " + REFERENCE_LOCK + " " + (shot.action || "");
@@ -780,6 +811,8 @@ let currentReel = null; // last generated reel object
 let neededSheets = [];  // [{key, title, defaultPrompt}] computed from currentReel
 let remixSource = null; // {label, hookStyle, structure, register, casting, bookend} when remixing a past winner
 let stillsMode = "per-shot"; // "per-shot" or "grid"
+let videoMode = "per-shot";  // "per-shot" or "kling-transitions"
+let klingSrc = "instant";    // "instant" or "director" (source of the Kling transition prompts)
 let copyRegistry = {};  // copyId -> raw text for clipboard buttons
 let copyIdSeq = 0;
 const nextCopyId = () => "c" + (copyIdSeq++);
@@ -1304,11 +1337,52 @@ function renderStills() {
     storyboardCardHTML({ ...currentReel, shots: b }, hasPerson, db.cols, db.rows, rangeLabel(b, 2));
 }
 
+// One Kling 3.0 transition segment card: shot A as the start frame, shot B as the end frame.
+function transitionCardHTML(a, b, prompt) {
+  const cId = nextCopyId(); copyRegistry[cId] = prompt;
+  return `
+  <div class="shot-card">
+    <div class="shot-head" data-action="toggle-shot">
+      <div class="shot-top">
+        <span class="shot-n">${String(a.n).padStart(2, "0")} to ${String(b.n).padStart(2, "0")}</span>
+        <span class="shot-t">Kling 3.0 transition</span>
+      </div>
+      <p class="shot-meta"><strong>Start frame:</strong> shot ${a.n} still &nbsp; <strong>End frame:</strong> shot ${b.n} still</p>
+      <p class="shot-action">${escapeHtml(a.action || "")} <span class="dim-text">into</span> ${escapeHtml(b.action || "")}</p>
+      <div class="shot-toggle-label label10 brass">Kling 3.0 start to end prompt ▾ / ▴</div>
+    </div>
+    <div class="shot-prompt-wrap">
+      <div class="label10 brass" style="margin-bottom:4px">KLING 3.0 · SHOT ${a.n} INTO SHOT ${b.n}</div>
+      <p class="sheet-prompt">${escapeHtml(prompt)}</p>
+      <button class="btn-copy" data-action="copy" data-copy-id="${cId}">Copy transition prompt</button>
+    </div>
+  </div>`;
+}
+
 function renderShots(reel, hasPerson) {
   const reg = reel.register || "graceful";
   const el = document.getElementById("shotsGrid");
-  const lastN = Math.max(0, ...(reel.shots || []).map((s) => s.n || 0));
-  el.innerHTML = (reel.shots || []).map((s) => shotCardHTML(s, buildHiggsfieldPrompt(s, reg, hasPerson), buildSeedancePrompt(s, reg, hasPerson), lastN)).join("");
+  const shots = (reel.shots || []).slice().sort((x, y) => (x.n || 0) - (y.n || 0));
+  const lastN = Math.max(0, ...shots.map((s) => s.n || 0));
+  if (videoMode === "kling-transitions") {
+    if (shots.length < 2) { el.innerHTML = `<p class="dim-text">You need at least two shots to chain Kling transitions.</p>`; return; }
+    const dir = reel.transitions || [];
+    const cards = [];
+    for (let i = 0; i < shots.length - 1; i++) {
+      const a = shots[i], b = shots[i + 1];
+      let prompt;
+      if (klingSrc === "director") {
+        const t = dir.find((x) => Number(x.from) === a.n && Number(x.to) === b.n);
+        prompt = t && t.prompt ? t.prompt : buildKlingTransitionInstant(a, b, reg, hasPerson);
+      } else {
+        prompt = buildKlingTransitionInstant(a, b, reg, hasPerson);
+      }
+      cards.push(transitionCardHTML(a, b, prompt));
+    }
+    el.innerHTML = cards.join("");
+    return;
+  }
+  el.innerHTML = shots.map((s) => shotCardHTML(s, buildHiggsfieldPrompt(s, reg, hasPerson), buildSeedancePrompt(s, reg, hasPerson), lastN)).join("");
 }
 
 // ---------- Slate + caption + copy-everything ----------
@@ -1432,6 +1506,36 @@ function renderResults(reel, criticIssues) {
 
 // ---------- Generation pipeline ----------
 const INSPO_INSTRUCTION = `Task: the user has uploaded a single image as inspiration for a DELAUX reel. Study it closely, the setting, the light, the colours, the mood, any people, objects, textures, and the feeling it gives, then translate it into the DELAUX world of luxury hardshell luggage and aspirational travel and pitch reel ideas built from it. Stay fully inside the DELAUX brand, cast, and palette, and never copy a real brand or a real place name. Respond with ONLY a valid JSON object with these fields: "read" a string of one or two sentences naming what the image shows and its mood, "concepts" an array of two or three objects each with "title" a short name, "hook" the shot 1 visual hook, "story" a one line arc, "look" which reference look or vibe it fits, and "why" one line on why it could perform, and "brief" a single ready to paste brief line the user can drop into the app, naming a cast member, a vibe word, and a colourway when it fits. No text outside the JSON.`;
+
+const TRANSITIONS_INSTRUCTION = `Task: the reel below is already written as a sequence of shots. Write the Kling 3.0 first and last frame transition prompts that turn it into one smooth continuous piece. For every consecutive pair, shot 1 into shot 2, shot 2 into shot 3, and so on to the final pair, write one flowing Kling 3.0 paragraph that opens exactly on the earlier shot as the start frame and moves in a single unbroken continuous take into the next shot as the end frame, so the two cut together invisibly and the motion makes narrative and visual sense. Anchor the subject early, describe the motion over time as it carries from one composition into the next, keep the DELAUX case and any named person identical across both frames, match the light and the grade end to end, and ease onto the end frame. Respond with ONLY a valid JSON object of the form { "transitions": [ { "from": 1, "to": 2, "prompt": "..." } ] } with one entry per consecutive pair in order and nothing outside the JSON.`;
+
+async function getTransitions() {
+  const status = document.getElementById("transitionsStatus");
+  if (!currentReel) return;
+  const apiKey = document.getElementById("apiKeyInput").value.trim();
+  if (!apiKey) { status.textContent = "Paste your Anthropic API key above first."; return; }
+  const btn = document.getElementById("writeTransitionsBtn");
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = "Writing transitions…";
+  status.textContent = "";
+  try {
+    const shots = (currentReel.shots || []).slice().sort((a, b) => (a.n || 0) - (b.n || 0));
+    const brief = "Register: " + (currentReel.register || "graceful") + ".\nShots in order:\n" +
+      shots.map((s) => `${s.n}: ${s.action || ""} Camera: ${s.camera || ""}. Eye on: ${s.poi || ""}.`).join("\n");
+    const data = await withRetry(() => callDirector(apiKey, TRANSITIONS_INSTRUCTION, brief));
+    if (data && Array.isArray(data.transitions) && data.transitions.length) {
+      currentReel.transitions = data.transitions;
+      status.textContent = "Smooth transitions written. They are showing below.";
+      renderShots(currentReel, (currentReel.people || []).length > 0);
+    } else {
+      status.textContent = "The transitions came back empty, try again.";
+    }
+  } catch (e) {
+    const raw = (e && e.message) ? String(e.message) : "";
+    status.textContent = "Could not write the transitions." + (raw ? " Reason: " + raw + "." : "") + " Check your key and credit balance at console.anthropic.com, then try again.";
+  }
+  btn.disabled = false; btn.textContent = orig;
+}
 
 async function callDirector(apiKey, instruction, userContent, image) {
   let content = userContent;
@@ -1756,6 +1860,27 @@ document.addEventListener("click", (e) => {
     renderStills();
     return;
   }
+
+  if (action === "video-mode") {
+    videoMode = btn.value;
+    const ctrls = document.getElementById("klingTransitionControls");
+    if (ctrls) ctrls.hidden = videoMode !== "kling-transitions";
+    if (currentReel) renderShots(currentReel, (currentReel.people || []).length > 0);
+    return;
+  }
+
+  if (action === "kling-src") {
+    klingSrc = btn.value;
+    const wbtn = document.getElementById("writeTransitionsBtn");
+    if (wbtn) {
+      wbtn.hidden = klingSrc !== "director";
+      wbtn.textContent = (currentReel && currentReel.transitions) ? "Rewrite smooth transitions with the director" : "Write smooth transitions with the director";
+    }
+    if (currentReel) renderShots(currentReel, (currentReel.people || []).length > 0);
+    return;
+  }
+
+  if (action === "write-transitions") { getTransitions(); return; }
 
   if (action === "toggle-library") {
     const panel = document.getElementById("libraryPanel");
