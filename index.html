@@ -164,6 +164,14 @@
       <textarea id="trendInput" rows="2" placeholder="Describe a trending reel or format. The director keeps the mechanic that makes it spread and translates the rest into DELAUX language."></textarea>
     </label>
     <div style="margin-top:14px">
+      <span class="label10">Inspiration from an image, optional</span>
+      <p class="dim-text" style="margin:2px 0 6px">Upload any photo, a place, a mood, an outfit, a scene, and the director reads it and pitches DELAUX reel ideas you can build the story from.</p>
+      <img id="inspoPreview" class="sheet-image-preview" hidden style="margin-bottom:8px" />
+      <input type="file" accept="image/*" id="inspoImageFile" style="display:block;width:100%;font-size:12px;color:var(--espresso)" />
+      <button class="btn-toggle" id="inspoBtn" data-action="get-inspo" style="margin-top:8px">Get story inspiration</button>
+      <div id="inspoResult"></div>
+    </div>
+    <div style="margin-top:14px">
       <span class="label10">Use my saved sheets, optional</span>
       <div id="mySheetsPicker" class="sheets-picker"></div>
     </div>
@@ -321,9 +329,12 @@ const HOUSE_TASTE = [
 
 const STRUCTURES = ["Director's choice", "Save the cat", "Problem, agitation, solution", "Hero's journey", "In medias res", "Quiet twist", "Mystery box", "Two paths", "Day in the life"];
 
-const VERSION = "7.1";
+const VERSION = "7.2";
 try { document.title = "DELAUX Reel Studio v" + VERSION; } catch (e) {}
 const CHANGELOG = [
+  { version: "7.2", date: "2026-07-20", notes: [
+      "New Inspiration from an image tool. There is now an image upload right in the main form, under the trend box. Drop in any photo, a place, a mood, an outfit, a scene, anything that caught your eye, and hit Get story inspiration. The director actually looks at the image and pitches two or three DELAUX reel concepts built from it, each with a hook, a one line story, the reference look it fits, and why it could perform, plus a ready to paste brief. Tap Use this as my brief and it drops that line straight into the brief box so you can direct the reel from it. It reads the picture and translates it into the DELAUX world, staying inside the brand, cast, and palette, never copying a real place or label.",
+    ] },
   { version: "7.1", date: "2026-07-20", notes: [
       "Made the women desirable, not buttoned up. The old styling dressed the cast in tailored coats, silk blouses, and trousers and pushed every mood toward quiet, understated, and covered, which read formal and stiff. The whole outfit engine now leans desirable and alluring: fluid silk slip dresses that skim the body, bias cuts that move, elegant cutouts, open backs and bare shoulders, a thigh high slit, and sun drenched resort glamour like a swimsuit under an open linen shirt or a sheer kaftan by the water, warm sun kissed skin, breezy fabrics, barefoot on warm stone or a fine strappy heel. This is set in three places so it holds everywhere: a new WARDROBE AND ALLURE rule in the director's brain that dresses the cast this way in every reel, the automatic outfit maker (the cast style and every register mood rewritten toward alluring resort styling), and the outfit sheet maker (styled like a high end resort campaign now, not a lookbook of considered tailoring). It stays tasteful and fully luxury, never vulgar, and the outfit still keeps to the colourway harmony so the case is still the one bold object.",
     ] },
@@ -759,6 +770,7 @@ let reelHistory = [];   // rating history: [{liked, hookStyle, structure, booken
 let projects = [];      // saved past reels: [{id, ts, brief, reel, criticIssues}], newest first
 let pendingImages = {}; // key -> dataURL, staged image picks not yet saved to the library
 let newSheetImage = null; // staged image for the "Add a new sheet" form in the library panel
+let inspoImage = null;    // staged image for the "Inspiration from an image" feature
 let lastReelDigest = null; // pending rating candidate for the reel currently on screen
 let libraryStatusMsg = "";  // one-shot status line shown atop the library panel (e.g. after a restore)
 let currentReel = null; // last generated reel object
@@ -1416,7 +1428,14 @@ function renderResults(reel, criticIssues) {
 }
 
 // ---------- Generation pipeline ----------
-async function callDirector(apiKey, instruction, userContent) {
+const INSPO_INSTRUCTION = `Task: the user has uploaded a single image as inspiration for a DELAUX reel. Study it closely, the setting, the light, the colours, the mood, any people, objects, textures, and the feeling it gives, then translate it into the DELAUX world of luxury hardshell luggage and aspirational travel and pitch reel ideas built from it. Stay fully inside the DELAUX brand, cast, and palette, and never copy a real brand or a real place name. Respond with ONLY a valid JSON object with these fields: "read" a string of one or two sentences naming what the image shows and its mood, "concepts" an array of two or three objects each with "title" a short name, "hook" the shot 1 visual hook, "story" a one line arc, "look" which reference look or vibe it fits, and "why" one line on why it could perform, and "brief" a single ready to paste brief line the user can drop into the app, naming a cast member, a vibe word, and a colourway when it fits. No text outside the JSON.`;
+
+async function callDirector(apiKey, instruction, userContent, image) {
+  let content = userContent;
+  if (image) {
+    const m = /^data:(image\/[a-zA-Z+]+);base64,(.*)$/.exec(image);
+    if (m) content = [{ type: "image", source: { type: "base64", media_type: m[1], data: m[2] } }, { type: "text", text: userContent }];
+  }
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -1429,7 +1448,7 @@ async function callDirector(apiKey, instruction, userContent) {
       model: "claude-sonnet-4-6",
       max_tokens: 4000,
       system: SYSTEM_PROMPT + "\n\n" + instruction,
-      messages: [{ role: "user", content: userContent }],
+      messages: [{ role: "user", content: content }],
     }),
   });
   const data = await response.json();
@@ -1542,6 +1561,49 @@ function historyHint() {
     tweakedLot.length ? `Patterns that needed heavy manual rework before they worked, use these more cautiously and vary the details more: ${tweakedLot.map(digest).filter(Boolean).join("; ")}.` : "",
     notForMe.length ? `Patterns that did not land at all, do not just repeat these: ${notForMe.map(digest).filter(Boolean).join("; ")}.` : "",
   ].filter(Boolean).join(" ");
+}
+
+async function getInspo() {
+  const out = document.getElementById("inspoResult");
+  const apiKey = document.getElementById("apiKeyInput").value.trim();
+  if (!apiKey) { out.innerHTML = `<p class="hint" style="color:var(--brass);margin-top:10px">Paste your Anthropic API key above first.</p>`; return; }
+  if (!inspoImage) { out.innerHTML = `<p class="hint" style="color:var(--brass);margin-top:10px">Upload an image first, then get inspiration.</p>`; return; }
+  const btn = document.getElementById("inspoBtn");
+  const original = btn.textContent;
+  btn.disabled = true; btn.textContent = "Reading the image…";
+  out.innerHTML = "";
+  try {
+    const data = await withRetry(() => callDirector(apiKey, INSPO_INSTRUCTION, "Here is my inspiration image. Read it and pitch DELAUX reel ideas built from it.", inspoImage));
+    renderInspo(data);
+  } catch (e) {
+    const raw = (e && e.message) ? String(e.message) : "";
+    out.innerHTML = `<p class="hint" style="color:var(--brass);margin-top:10px">Could not read the image after a few tries.${raw ? " Reason: " + escapeHtml(raw) + "." : ""} Check your key and credit balance at console.anthropic.com and try again.</p>`;
+  }
+  btn.disabled = false; btn.textContent = original;
+}
+
+function renderInspo(d) {
+  const out = document.getElementById("inspoResult");
+  if (!d || typeof d !== "object") { out.innerHTML = `<p class="hint" style="color:var(--brass);margin-top:10px">The read came back empty, try again.</p>`; return; }
+  const concepts = Array.isArray(d.concepts) ? d.concepts : [];
+  const cards = concepts.map((c) => `
+      <div style="border-top:1px solid var(--sand);padding:10px 0">
+        <div style="font-weight:600">${escapeHtml(c.title || "Concept")}</div>
+        <p class="dim-text" style="margin:4px 0"><strong>Hook:</strong> ${escapeHtml(c.hook || "")}</p>
+        <p class="dim-text" style="margin:4px 0"><strong>Story:</strong> ${escapeHtml(c.story || "")}</p>
+        ${c.look ? `<p class="dim-text" style="margin:4px 0"><strong>Look:</strong> ${escapeHtml(c.look)}</p>` : ""}
+        ${c.why ? `<p class="dim-text" style="margin:4px 0"><strong>Why it works:</strong> ${escapeHtml(c.why)}</p>` : ""}
+      </div>`).join("");
+  const brief = d.brief ? String(d.brief) : "";
+  out.innerHTML = `
+    <div style="margin-top:12px;padding:12px;border:1px solid var(--sand);border-radius:10px">
+      ${d.read ? `<p class="dim-text" style="margin:0 0 8px">${escapeHtml(d.read)}</p>` : ""}
+      ${cards}
+      ${brief ? `<div style="border-top:1px solid var(--sand);padding-top:10px;margin-top:6px">
+        <p class="dim-text" style="margin:0 0 6px"><strong>Suggested brief:</strong> ${escapeHtml(brief)}</p>
+        <button class="btn-solid" data-action="use-inspo-brief" data-brief="${escapeHtml(brief)}">Use this as my brief</button>
+      </div>` : ""}
+    </div>`;
 }
 
 async function generate() {
@@ -1673,6 +1735,13 @@ document.addEventListener("click", (e) => {
   const action = btn.dataset.action;
 
   if (action === "generate") { generate(); return; }
+
+  if (action === "get-inspo") { getInspo(); return; }
+  if (action === "use-inspo-brief") {
+    const bi = document.getElementById("briefInput");
+    if (bi) { bi.value = btn.dataset.brief || ""; bi.focus(); bi.scrollIntoView({ behavior: "smooth", block: "center" }); }
+    return;
+  }
 
   if (action === "toggle-remember-key") {
     persistApiKey();
@@ -1943,6 +2012,19 @@ document.addEventListener("click", (e) => {
 
 // ---------- Reference image picker: read, downscale, and stage the chosen file for the card it belongs to ----------
 document.addEventListener("change", async (e) => {
+  if (e.target.id === "inspoImageFile") {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      inspoImage = await resizeImageFile(file, 1200, 0.82);
+      const pv = document.getElementById("inspoPreview");
+      if (pv) { pv.src = inspoImage; pv.hidden = false; }
+    } catch (err) {
+      const out = document.getElementById("inspoResult");
+      if (out) out.innerHTML = `<p class="hint" style="color:var(--brass);margin-top:10px">Could not use that image, try a different one.</p>`;
+    }
+    return;
+  }
   if (e.target.id === "newSheetImageFile") {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
